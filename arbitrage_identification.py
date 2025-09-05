@@ -9,9 +9,11 @@ from processing import get_data
 from dateutil.relativedelta import relativedelta
 
 def rescale_iv(iv: float, T: int, h: int) -> float:
+    "Rescale `iv` to match horizon `h`, given `T` days until expiration."
     return iv * np.sqrt(T / h)
 
 def load_trained_models(encoder_path: str, xgb_path: str, num_features: int = 6, hidden_dim: int = 64, num_layers: int = 1) -> tuple[LSTMEncoder, xgb.Booster]:
+    """Load the trained models. The encoder should be saved as a state dict."""
     # Instantiate models
     booster = xgb.Booster()
     encoder = LSTMEncoder(input_dim=num_features, hidden_dim=hidden_dim, num_layers=num_layers)
@@ -22,14 +24,41 @@ def load_trained_models(encoder_path: str, xgb_path: str, num_features: int = 6,
 
     return encoder, booster
 
-def generate_trades(symbol: str, test_data: pl.DataFrame, fit_uncertainties: list[float], start_index: int, max_horizon: int = 21, window_size: int = 64, z_threshold: float = 1.93) -> tuple[pl.Series, list[float]]:
-    X_raw_orig = test_data.group_by("date").first().sort("date")[start_index:]
+def generate_trades(symbol: str, data: pl.DataFrame, fit_uncertainties: list[float], start_index: int, max_horizon: int = 21, window_size: int = 64, z_threshold: float = 1.93) -> tuple[pl.Series, list[float]]:
+    """
+    Conduct trades on `symbol` given the (unfiltered) `test_data` and model initial conditions.
+
+    Parameters
+    ----------
+    symbol : str
+        The stock symbol on which trades are conducted. Used to load saved models.
+    data : pl.DataFrame
+        The unfiltered and unaggregated data that will be transformed into test_data for trading. Contains daily option bid/ask, greeks, and underlying close data.
+    fit_uncertainties : list[float]
+        The standard deviations of each step's fit.
+    start_index : int
+        Start index of the testing data.
+    max_horizon : int
+        The farthest number of days for which we have predictions at any time. Corresponds to `horizon` argument in `vol_model.produce_predictions`. Default is `21`.
+    window_size : int
+        The number of past days the model has to look at when generating predictions at each step. Corresponds to `T` argument in `vol_model.produce_predictions`. Default is `64`.
+    z_threshold : float
+        The minimum 1-step z-score to allow us to conduct trades. Helps regularize fit and ensure we don't trade on uncertain information. Default is `1.93`, a 95% confidence interval.
+    
+    Returns
+    -------
+    test_date_series : pl.Series
+        The series of testing dates. Useful for plotting results.
+    total_profit : list[float]
+        A list of the model's total profit at each step.
+    """
+    X_raw_orig = data.group_by("date").first().sort("date")[start_index:]
     date_series = X_raw_orig["date"]
     X_raw = X_raw_orig["returns", "realized_volatility_5", "realized_volatility_11", "realized_volatility_21", "realized_volatility_60", "vol_of_vol_21"].to_numpy()
     X = np.array([X_raw[i : i + window_size] for i in range(len(X_raw) - window_size - max_horizon)], dtype=np.float32)
     encoder, booster = load_trained_models(f"models/encoder_{symbol}.torch", f"models/xgb_model_{symbol}.bin")
     trades = {
-        "puts_long": [], # (contract_id, rand_id, strike_price, premium_when_position_opened, close_position_date, exp_date, enter_date)
+        "puts_long": [], # (contract_id, open_state, strike_price, premium_when_position_opened, close_position_date, exp_date, enter_date)
         "puts_short": [],
         "num_underlying": 0,
         "total_profit": 0.0,
@@ -40,7 +69,7 @@ def generate_trades(symbol: str, test_data: pl.DataFrame, fit_uncertainties: lis
         print(f"[Iteration {i}] \t Date: {current_date} \t Profit: {trades['total_profit']} \t Num underlying: {trades['num_underlying']}")
         # Get data for the right date
         current_feature = X[i]
-        current_date_data = test_data.filter(pl.col("date") == current_date)
+        current_date_data = data.filter(pl.col("date") == current_date)
 
         # Select the most ATM put
         S0 = current_date_data["close"].unique().item()
@@ -51,7 +80,7 @@ def generate_trades(symbol: str, test_data: pl.DataFrame, fit_uncertainties: lis
         for j, position in enumerate(trades["puts_long"]):
             if position[4] <= current_date and position[1]: # close the position
                 option_data = current_date_data.filter(pl.col("contractID") == position[0])
-                if option_data.is_empty(): option_data = test_data.filter(pl.col("contractID") == position[0])[-1]
+                if option_data.is_empty(): option_data = data.filter(pl.col("contractID") == position[0])[-1]
                 trade_price = np.random.uniform(option_data["bid"].item(), option_data["ask"].item())
                 trades["total_profit"] += trade_price * 100
                 trades["puts_long"][j][1] = False
@@ -59,7 +88,7 @@ def generate_trades(symbol: str, test_data: pl.DataFrame, fit_uncertainties: lis
         for j, position in enumerate(trades["puts_short"]):
             if position[4] <= current_date and position[1]: # close the position
                 option_data = current_date_data.filter(pl.col("contractID") == position[0])
-                if option_data.is_empty(): option_data = test_data.filter(pl.col("contractID") == position[0])[-1]
+                if option_data.is_empty(): option_data = data.filter(pl.col("contractID") == position[0])[-1]
                 trade_price = np.random.uniform(option_data["bid"].item(), option_data["ask"].item())
                 trades["total_profit"] -= trade_price * 100
                 trades["puts_short"][j][1] = False
@@ -81,7 +110,7 @@ def generate_trades(symbol: str, test_data: pl.DataFrame, fit_uncertainties: lis
         if T_put.days != 0:
             next_z_score = put_z_scores[0]
             trade_price = np.random.uniform(atm_put["bid"].item(), atm_put["ask"].item())
-            if abs(next_z_score) > z_threshold: # only act when we are ~95% confident that there is a signal
+            if abs(next_z_score) > z_threshold: # only act when we meet the confidence threshold
                 if next_z_score > 0:
                     # Sell short (overpriced IV)
                     # Find position close date
@@ -109,12 +138,12 @@ def generate_trades(symbol: str, test_data: pl.DataFrame, fit_uncertainties: lis
         for position in trades["puts_long"]:
             if position[1]:
                 option_data = current_date_data.filter(pl.col("contractID") == position[0])
-                if option_data.is_empty(): option_data = test_data.filter(pl.col("contractID") == position[0])[-1]
+                if option_data.is_empty(): option_data = data.filter(pl.col("contractID") == position[0])[-1]
                 num_stocks += int(round(option_data["delta"].item()))
         for position in trades["puts_short"]:
             if position[1]:
                 option_data = current_date_data.filter(pl.col("contractID") == position[0])
-                if option_data.is_empty(): option_data = test_data.filter(pl.col("contractID") == position[0])[-1]
+                if option_data.is_empty(): option_data = data.filter(pl.col("contractID") == position[0])[-1]
                 num_stocks -= int(round(option_data["delta"].item()))
         trades["total_profit"] -= (num_stocks - trades["num_underlying"]) * S0
         trades["num_underlying"] += num_stocks - trades["num_underlying"]
@@ -127,8 +156,20 @@ def generate_trades(symbol: str, test_data: pl.DataFrame, fit_uncertainties: lis
     return date_series[:len(X)], total_profit
 
 def run_algorithm(symbol: str) -> tuple[pl.Series, list[float]]:
-    data = get_data(symbol)
-    with open(f"models/run_config_{symbol}.json", "r") as file:
+    """
+    Run the trading algorithm on `symbol`.
+
+    Returns
+    -------
+    test_date_series : pl.Series
+        The series of testing dates. Useful for plotting results.
+    total_profit : list[float]
+        A list of the model's total profit at each step.
+    """
+    equity_delta_path = "" # path to the deltalake of equity data
+    options_delta_path = "" # path to the deltalake of option data
+    data = get_data(symbol, equity_delta_path, options_delta_path)
+    with open(f"configs/run_config_{symbol}.json", "r") as file:
         run_config = json.load(file)
     return generate_trades(symbol, data, run_config["uncertainties"], start_index=run_config["start_index"])
 
@@ -137,7 +178,7 @@ if __name__ == "__main__":
     date_series, total_profit = run_algorithm(symbol)
 
     plt.plot(date_series, total_profit)
-    plt.title(f"{symbol} Volatility Arbitrage")
+    plt.title(f"{symbol} Volatility Arbitrage Backtest")
     plt.xlabel("Time")
     plt.ylabel("Profit")
     plt.show()

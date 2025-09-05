@@ -17,7 +17,7 @@ from pathlib import Path
 # Self-Supervised LSTM Encoder
 class LSTMEncoder(nn.Module):
     """
-    Encodes a sequence window (T, d) into an embedding vector e_t.
+    Encodes a sequence window into an embedding vector.
     """
     def __init__(self, input_dim: int, hidden_dim: int, num_layers: int = 1):
         super().__init__()
@@ -25,11 +25,14 @@ class LSTMEncoder(nn.Module):
 
     def forward(self, x):
         _, (h_n, _) = self.lstm(x)
-        return h_n[-1] # (batch, hidden_dim)
+        return h_n[-1]
 
 
 # Next-step prediction head
 class NextStepHead(nn.Module):
+    """
+    A simple linear layer to help with LSTM training.
+    """
     def __init__(self, hidden_dim: int, output_dim: int = 21):
         super().__init__()
         self.fc = nn.Linear(hidden_dim, output_dim)
@@ -40,6 +43,34 @@ class NextStepHead(nn.Module):
 
 # SSL Training Loop
 def train_self_supervised(symbol: str, encoder: LSTMEncoder, head: NextStepHead, train_loader: DataLoader, epochs: int, lr: float, device: Literal["cpu", "cuda"] = "cpu") -> tuple[LSTMEncoder, nn.Sequential]:
+    """
+    Train the LSTM encoder.
+
+    Parameters
+    ----------
+    symbol : str
+        The stock symbol on which we are training. Used to properly name saved models.
+    encoder : LSTMEncoder
+        The encoder object to be trained.
+    head : NextStepHead
+        The linear layer to be used in `nn.Sequential` with the `LSTMEncoder`.
+    train_loader : DataLoader
+        Training data in PyTorch's `DataLoader` form. The targets should have already been generated.
+    epochs : int
+        The number of epochs for training.
+    lr : float
+        Learning rate
+    device : Literal["cpu", "cuda"]
+        The device to use for training. Default is `cpu` (as I sadly don't have a GPU suitable for training).
+    
+    Returns
+    -------
+    trained_encoder : LSTMEncoder
+        The trained encoder object.
+    trained_model : nn.Sequential
+        The encoder with the additional `NextStepHead` later. Only used for model validation comparison.
+    """
+    # Load models
     model = nn.Sequential(encoder, head).to(device)
     if Path("models", f"encoder_{symbol}.torch").is_file():
         encoder.load_state_dict(torch.load(f"models/encoder_{symbol}.torch", weights_only=True))
@@ -49,6 +80,7 @@ def train_self_supervised(symbol: str, encoder: LSTMEncoder, head: NextStepHead,
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = nn.MSELoss()
 
+    # Training loop
     model.train()
     for epoch in range(epochs):
         total_loss = 0.0
@@ -71,10 +103,11 @@ def train_self_supervised(symbol: str, encoder: LSTMEncoder, head: NextStepHead,
         
         print(f"Epoch {epoch+1}, Loss = {total_loss / n:.6f}")
 
-    return encoder, model # trained encoder, head discarded later
+    return encoder, model
 
 
 def extract_features(encoder: LSTMEncoder, X: np.ndarray, batch_size: int = 4096, device: Literal["cpu", "cuda"] = "cpu") -> np.ndarray:
+    """Extract the hidden layer from `encoder`, given input `X`."""
     encoder.eval()
     feats = []
 
@@ -88,11 +121,11 @@ def extract_features(encoder: LSTMEncoder, X: np.ndarray, batch_size: int = 4096
             h = encoder(xb)
             feats.append(h.cpu())
             i += 1
-    return torch.cat(feats).numpy()  # (n_samples, hidden_dim)
+    return torch.cat(feats).numpy()
 
 
 def model_predictions(model: nn.Sequential, X: np.ndarray, batch_size: int = 4096, device: Literal["cpu", "cuda"] = "cpu") -> np.ndarray:
-    """Produce predictions for the non-XGBoost model (for comparison purposes)."""
+    """Produce predictions on input `X` for the non-XGBoost model (for comparison purposes)."""
     model.eval()
     preds = []
 
@@ -111,7 +144,45 @@ def model_predictions(model: nn.Sequential, X: np.ndarray, batch_size: int = 409
 
 
 def produce_predictions(symbol: str, data: pl.DataFrame, save_models: bool, T: int, epochs: int, horizon: int = 21, train_fraction: float = 0.8, val_fraction: float = 0.1) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[tuple[float, float]], list[tuple[float, float]], pl.Series, int]:
-    """Produce predictions for the LSTM + XGBoost model."""
+    """Produce predictions for the LSTM + XGBoost model.
+    
+    Parameters
+    ----------
+    symbol : str
+        The stock symbol for which to generate predictions.
+    data : pl.DataFrame
+        The entire set of unprocessed option data.
+    save_models : bool
+        Whether or not to save the models to the `/models` subdirectory.
+    T : int
+        Lookback window length (in days).
+    epochs : int
+        Number of epochs for LSTM training.
+    horizon : int
+        Number of points for which to generate forward predictions. Default is `21`.
+    train_fraction : float
+        The fraction of data used for training. Default is `0.8`.
+    val_fraction : float
+        The fraction of data used for validation. Validation data is used for confidence interval fitting. Default is `0.1`. 
+        Note that `test_fraction = 1 - train_fraction - val_fraction`.
+    
+    Returns
+    -------
+    y_test : np.ndarray
+        The matrix of test set response values.
+    y_preds_test : np.ndarray
+        The matrix of test set predictions.
+    residuals : np.ndarray
+        The matrix of residual errors for each step's prediction.
+    conf_intervals : list[tuple[float, float]]
+        The confidence interval on the residuals for each step.
+    parameters : list[tuple[float, float]]
+        The parameters of each fitted normal error distribution. Used to extract standard deviation for uncertainty quantification.
+    date_col : pl.Series
+        A series of dates that are simple to use for plotting purposes.
+    val_test_split : int
+        The index where the validation fraction of `date_col` ends and the testing fraction begins.
+    """
     assert train_fraction + val_fraction < 1
     # Filter data so there is only one entry per date
     proc_data = data.group_by("date").first().sort("date")
@@ -119,7 +190,7 @@ def produce_predictions(symbol: str, data: pl.DataFrame, save_models: bool, T: i
     # Process data
     X_raw = proc_data.drop("date").to_numpy()
     y_raw = proc_data["realized_volatility_21"].to_numpy()
-    # Build self-supervised windows to predict next-step return
+    # Build self-supervised windows to predict n-step return
     X = np.array([X_raw[i : i + T] for i in range(len(proc_data) - T - horizon)], dtype=np.float32)
     y = np.array([y_raw[i + T : i + T + horizon] for i in range(len(proc_data) - T - horizon)], dtype=np.float32)
     date_col = proc_data["date"][:-T - horizon]
@@ -151,7 +222,6 @@ def produce_predictions(symbol: str, data: pl.DataFrame, save_models: bool, T: i
     dtrain = xgb.DMatrix(train_embed, label=y_train)
     dval = xgb.DMatrix(val_embed, label=y_val)
     dtest = xgb.DMatrix(test_embed, label=y_test)
-
     params = {
         "objective": "reg:squarederror",
         "max_depth": 4,
@@ -172,10 +242,11 @@ def produce_predictions(symbol: str, data: pl.DataFrame, save_models: bool, T: i
     parameters = [norm.fit([elem[i] for elem in val_residuals]) for i in range(horizon)]
     conf_intervals = [norm.interval(0.95, *params) for params in parameters]
 
+    # Generate final predictions
     y_preds_test = booster.predict(dtest)
     rmses = [root_mean_squared_error([elem[i] for elem in y_test], [elem[i] for elem in y_preds_test]) for i in range(horizon)]
 
-    # print(f"[Downstream XGB] Vol target RMSE: {rmse:.6f}")
+    # Print error metrics for each step
     for i, elem in enumerate(rmses):
         print(f"[XGB] {i}-Step RMSE: {elem:.6f}")
     print(f"Overall RMSE: {root_mean_squared_error(y_test, y_preds_test):.6f}")
@@ -186,25 +257,32 @@ def produce_predictions(symbol: str, data: pl.DataFrame, save_models: bool, T: i
 if __name__ == "__main__":
     start = time.perf_counter()
 
-    symbol = "AMZN"
-    data = get_data(symbol)
+    # Settings
+    symbol = "AAPL"
+    equity_delta_path = "" # path to the deltalake of equity data
+    options_delta_path = "" # path to the deltalake of option data
+    data = get_data(symbol, equity_delta_path, options_delta_path)
     T = 64
-    num_epochs = 10
+    num_epochs = 20
     y_test, y_preds, resid, conf_intervals, parameters, date_col, val_test_split = produce_predictions(symbol, data["date", "returns", "realized_volatility_5", "realized_volatility_11", "realized_volatility_21", "realized_volatility_60", "vol_of_vol_21"], save_models=True, T=T, epochs=num_epochs)
 
     print(f"Time taken: {time.perf_counter() - start} seconds")
 
     # Generate run configuration
     run_config = {"uncertainties": [float(elem[1]) for elem in parameters], "start_index": val_test_split}
-    with open(f"models/run_config_{symbol}.json", "w") as file:
+    with open(f"configs/run_config_{symbol}.json", "w") as file:
         json.dump(run_config, file)
 
-    n = 10
+    # Plot results
+    n = 1
     selected_preds = np.array([elem[n - 1] for elem in y_preds])
     plt.plot(date_col[val_test_split:], [elem[n - 1] for elem in y_test], label="Actual")
     plt.plot(date_col[val_test_split:], selected_preds, label=f"{n}-Step Predicted", c="red")
     plt.plot(date_col[val_test_split:], selected_preds + conf_intervals[n - 1][0], linestyle="dotted", alpha=0.5, c="red", label="95% Confidence Interval")
     plt.plot(date_col[val_test_split:], selected_preds + conf_intervals[n - 1][1], linestyle="dotted", alpha=0.5, c="red")
+    plt.title(f"{symbol} Volatility Forecasting")
+    plt.xlabel("Time")
+    plt.ylabel("Volatility")
     plt.legend()
     plt.show()
 

@@ -15,3 +15,6 @@ data/
 # Models
 models/
 configs/
+
+# Images
+images/
