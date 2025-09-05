@@ -4,33 +4,13 @@ import torch.nn as nn
 import time
 import xgboost as xgb
 import matplotlib.pyplot as plt
+import polars as pl
 from torch.utils.data import DataLoader, TensorDataset
-from data.data_acquisition import get_data
+from processing import get_data
 from sklearn.metrics import root_mean_squared_error
-from typing import Literal
+from scipy.stats import norm, t
+from typing import Literal, Callable
 from pathlib import Path
-
-
-def create_sequences(data: np.ndarray, target: np.ndarray, window_size: int) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Generate the targets for the model.
-
-    Parameters
-    ----------
-    data : np.array of shape (N, F)   # features (returns, rv5, rv21, rv60, ...)
-    target : np.array of shape (N,)   # next-day realized volatility
-    window_size : int                 # lookback length
-    
-    Returns
-    ----------
-        X: np.array of shape (num_samples, window_size, F)
-        y: np.array of shape (num_samples,)
-    """
-    X, y = [], []
-    for i in range(len(data) - window_size):
-        X.append(data[i:i + window_size])     # shape (window_size, F)
-        y.append(target[i + window_size])     # scalar
-    return np.array(X, dtype=np.float32), np.array(y, dtype=np.float32) # X: (batch, time, features)
 
 
 # Self-Supervised LSTM Encoder
@@ -49,7 +29,7 @@ class LSTMEncoder(nn.Module):
 
 # Next-step prediction head
 class NextStepHead(nn.Module):
-    def __init__(self, hidden_dim: int, output_dim: int = 1):
+    def __init__(self, hidden_dim: int, output_dim: int = 21):
         super().__init__()
         self.fc = nn.Linear(hidden_dim, output_dim)
 
@@ -58,7 +38,7 @@ class NextStepHead(nn.Module):
 
 
 # SSL Training Loop
-def train_self_supervised(encoder: LSTMEncoder, head: NextStepHead, train_loader: DataLoader, epochs: int = 5, lr: float = 1e-3, device: Literal["cpu", "cuda"] = "cpu", saved_model_path: str = "encoder.torch") -> tuple[LSTMEncoder, nn.Sequential]:
+def train_self_supervised(encoder: LSTMEncoder, head: NextStepHead, train_loader: DataLoader, epochs: int, lr: float, device: Literal["cpu", "cuda"] = "cpu", saved_model_path: str = "encoder.torch") -> tuple[LSTMEncoder, nn.Sequential]:
     model = nn.Sequential(encoder, head).to(device)
     if Path(saved_model_path).is_file():
         encoder.load_state_dict(torch.load(saved_model_path, weights_only=True))
@@ -101,7 +81,6 @@ def extract_features(encoder: LSTMEncoder, X: np.ndarray, batch_size: int = 4096
     with torch.no_grad():
         i = 1
         for xb in loader:
-            print(f"Count: {i}")
             if isinstance(xb, (list, tuple)):
                 xb = xb[0]
             xb: torch.Tensor = xb.to(device)
@@ -130,25 +109,29 @@ def model_predictions(model: nn.Sequential, X: np.ndarray, batch_size: int = 409
     return torch.cat(preds).numpy()
 
 
-def produce_predictions(save_models: bool = False, train_fraction: float = 0.8) -> tuple[np.ndarray, np.ndarray]:
+def produce_predictions(data: pl.DataFrame, save_models: bool, T: int, epochs: int, horizon: int = 21, train_fraction: float = 0.8, val_fraction: float = 0.1) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[tuple[float, float]], list[tuple[float, float]], pl.Series, int]:
     """Produce predictions for the LSTM + XGBoost model."""
-    # Acquire data
-    data = get_data("AAPL", filter_data_by_contract_duration=False)
-    X_raw = data[:-1]
-    y_raw = data["realized_volatility_21"].shift(-1).drop_nulls() # next day volatility
+    assert train_fraction + val_fraction < 1
+    # Filter data so there is only one entry per date
+    proc_data = data.group_by("date").first().sort("date")
 
+    # Process data
+    X_raw = proc_data.drop("date").to_numpy()
+    y_raw = proc_data["realized_volatility_21"].to_numpy()
     # Build self-supervised windows to predict next-step return
-    T = 64
-    X, y = create_sequences(X_raw.to_numpy(), y_raw.to_numpy(), T)  # self-supervised pairs (predict y_{t+T} from window ending at t + T - 1)
+    X = np.array([X_raw[i : i + T] for i in range(len(proc_data) - T - horizon)], dtype=np.float32)
+    y = np.array([y_raw[i + T : i + T + horizon] for i in range(len(proc_data) - T - horizon)], dtype=np.float32)
+    date_col = proc_data["date"][:-T - horizon]
+
 
     # Dataset construction
     n = len(X)
-    split = int(n * train_fraction)
-    X_train, X_test = X[:split], X[split:]
-    y_train, y_test = y[:split], y[split:]
+    train_val_split = int(n * train_fraction)
+    val_test_split = int(n * (train_fraction + val_fraction))
+    X_train, X_val, X_test = X[:train_val_split], X[train_val_split:val_test_split], X[val_test_split:]
+    y_train, y_val, y_test = y[:train_val_split], y[train_val_split:val_test_split], y[val_test_split:]
 
     dataset_train = TensorDataset(torch.tensor(X_train), torch.tensor(y_train))
-    # dataset_test = TensorDataset(torch.tensor(X_test), torch.tensor(y_test))
     dataloader_train = DataLoader(dataset_train, batch_size=128, shuffle=False)
 
     # SSL Training
@@ -156,45 +139,67 @@ def produce_predictions(save_models: bool = False, train_fraction: float = 0.8) 
     hidden_dim = 64
     encoder = LSTMEncoder(input_dim=X.shape[2], hidden_dim=hidden_dim, num_layers=1)
     head = NextStepHead(hidden_dim)
-    trained_encoder, model = train_self_supervised(encoder, head, dataloader_train, epochs=5, lr=1e-3, device=device)
-
-    if save_models:
-        torch.save(trained_encoder.state_dict(), "encoder.torch")
-        torch.save(model.state_dict(), "model.torch")
+    trained_encoder, model = train_self_supervised(encoder, head, dataloader_train, epochs=epochs, lr=1e-3, device=device)
     
     # Extract embeddings
     train_embed = extract_features(trained_encoder, X_train, device=device)  # (split, emb_dim)
+    val_embed = extract_features(trained_encoder, X_val, device=device)
     test_embed = extract_features(trained_encoder, X_test, device=device)
 
     # Train XGBoost on embeddings to predict volatility target
     dtrain = xgb.DMatrix(train_embed, label=y_train)
+    dval = xgb.DMatrix(val_embed, label=y_val)
     dtest = xgb.DMatrix(test_embed, label=y_test)
 
     params = {
         "objective": "reg:squarederror",
         "max_depth": 4,
-        "eta": 0.05,
+        "eta": 0.01,
         "subsample": 0.8,
         "colsample_bytree": 0.8,
-        "tree_method": "hist"  # fast
+        "tree_method": "hist"
     }
     booster = xgb.train(params, dtrain, num_boost_round=200)
-    y_preds = booster.predict(dtest)
-    rmse = root_mean_squared_error(y_test, y_preds)
+    if save_models:
+        torch.save(trained_encoder.state_dict(), "encoder.torch")
+        torch.save(model.state_dict(), "model.torch")
+        booster.save_model("xgb_model.bin")
 
-    print(f"[Downstream XGB] Vol target RMSE: {rmse:.6f}")
-    print(f"Time taken: {time.perf_counter() - start} seconds")
+    # Uncertainty Quantification
+    y_preds_val = booster.predict(dval)
+    val_residuals = y_val - y_preds_val
+    parameters = [norm.fit([elem[i] for elem in val_residuals]) for i in range(horizon)]
+    conf_intervals = [norm.interval(0.95, *params) for params in parameters]
 
-    return y_test, y_preds
+    y_preds_test = booster.predict(dtest)
+    rmses = [root_mean_squared_error([elem[i] for elem in y_test], [elem[i] for elem in y_preds_test]) for i in range(horizon)]
+
+    # print(f"[Downstream XGB] Vol target RMSE: {rmse:.6f}")
+    for i, elem in enumerate(rmses):
+        print(f"[XGB] {i}-Step RMSE: {elem:.6f}")
+    print(f"Overall RMSE: {root_mean_squared_error(y_test, y_preds_test):.6f}")
+
+    return y_test, y_preds_test, y_test - y_preds_test, conf_intervals, parameters, date_col, val_test_split
 
 
 if __name__ == "__main__":
     start = time.perf_counter()
 
-    y_test, y_preds = produce_predictions(save_models=False)
+    data = get_data("AAPL", filter_data_by_contract_duration=False, only_model_data=False)
+    T = 64
+    num_epochs = 5
+    y_test, y_preds, resid, conf_intervals, parameters, date_col, val_test_split = produce_predictions(data["date", "returns", "realized_volatility_5", "realized_volatility_11", "realized_volatility_21", "realized_volatility_60", "vol_of_vol_21"], save_models=True, T=T, epochs=num_epochs)
 
-    plt.plot(y_test, label="Actual")
-    plt.plot(y_preds, label="Predicted")
+    print(f"Time taken: {time.perf_counter() - start} seconds")
+    print([float(elem[1]) for elem in parameters])
+    print(val_test_split)
+
+    n = 5
+    selected_preds = np.array([elem[n - 1] for elem in y_preds])
+    plt.plot(date_col[val_test_split:], [elem[n - 1] for elem in y_test], label="Actual")
+    plt.plot(date_col[val_test_split:], selected_preds, label=f"{n}-Step Predicted")
+    plt.plot(date_col[val_test_split:], selected_preds + conf_intervals[n - 1][0], linestyle="-.", c="black")
+    plt.plot(date_col[val_test_split:], selected_preds + conf_intervals[n - 1][1], linestyle="-.", c="black")
     plt.legend()
     plt.show()
 
