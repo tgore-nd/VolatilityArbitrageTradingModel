@@ -38,11 +38,11 @@ class NextStepHead(nn.Module):
 
 
 # SSL Training Loop
-def train_self_supervised(encoder: LSTMEncoder, head: NextStepHead, train_loader: DataLoader, epochs: int, lr: float, device: Literal["cpu", "cuda"] = "cpu", saved_model_path: str = "encoder.torch") -> tuple[LSTMEncoder, nn.Sequential]:
+def train_self_supervised(symbol: str, encoder: LSTMEncoder, head: NextStepHead, train_loader: DataLoader, epochs: int, lr: float, device: Literal["cpu", "cuda"] = "cpu") -> tuple[LSTMEncoder, nn.Sequential]:
     model = nn.Sequential(encoder, head).to(device)
-    if Path(saved_model_path).is_file():
-        encoder.load_state_dict(torch.load(saved_model_path, weights_only=True))
-        model.load_state_dict(torch.load("model.torch", weights_only=True))
+    if Path(f"encoder_{symbol}.torch").is_file():
+        encoder.load_state_dict(torch.load(f"encoder_{symbol}.torch", weights_only=True))
+        model.load_state_dict(torch.load(f"model_{symbol}.torch", weights_only=True))
         return encoder, model
 
     opt = torch.optim.Adam(model.parameters(), lr=lr)
@@ -109,7 +109,7 @@ def model_predictions(model: nn.Sequential, X: np.ndarray, batch_size: int = 409
     return torch.cat(preds).numpy()
 
 
-def produce_predictions(data: pl.DataFrame, save_models: bool, T: int, epochs: int, horizon: int = 21, train_fraction: float = 0.8, val_fraction: float = 0.1) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[tuple[float, float]], list[tuple[float, float]], pl.Series, int]:
+def produce_predictions(symbol: str, data: pl.DataFrame, save_models: bool, T: int, epochs: int, horizon: int = 21, train_fraction: float = 0.8, val_fraction: float = 0.1) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[tuple[float, float]], list[tuple[float, float]], pl.Series, int]:
     """Produce predictions for the LSTM + XGBoost model."""
     assert train_fraction + val_fraction < 1
     # Filter data so there is only one entry per date
@@ -139,7 +139,7 @@ def produce_predictions(data: pl.DataFrame, save_models: bool, T: int, epochs: i
     hidden_dim = 64
     encoder = LSTMEncoder(input_dim=X.shape[2], hidden_dim=hidden_dim, num_layers=1)
     head = NextStepHead(hidden_dim)
-    trained_encoder, model = train_self_supervised(encoder, head, dataloader_train, epochs=epochs, lr=1e-3, device=device)
+    trained_encoder, model = train_self_supervised(symbol, encoder, head, dataloader_train, epochs=epochs, lr=1e-3, device=device)
     
     # Extract embeddings
     train_embed = extract_features(trained_encoder, X_train, device=device)  # (split, emb_dim)
@@ -161,9 +161,9 @@ def produce_predictions(data: pl.DataFrame, save_models: bool, T: int, epochs: i
     }
     booster = xgb.train(params, dtrain, num_boost_round=200)
     if save_models:
-        torch.save(trained_encoder.state_dict(), "encoder.torch")
-        torch.save(model.state_dict(), "model.torch")
-        booster.save_model("xgb_model.bin")
+        torch.save(trained_encoder.state_dict(), f"encoder_{symbol}.torch")
+        torch.save(model.state_dict(), f"model_{symbol}.torch")
+        booster.save_model(f"xgb_model_{symbol}.bin")
 
     # Uncertainty Quantification
     y_preds_val = booster.predict(dval)
@@ -185,10 +185,11 @@ def produce_predictions(data: pl.DataFrame, save_models: bool, T: int, epochs: i
 if __name__ == "__main__":
     start = time.perf_counter()
 
-    data = get_data("AAPL", filter_data_by_contract_duration=False, only_model_data=False)
+    symbol = "AMZN"
+    data = get_data(symbol, filter_data_by_contract_duration=False, only_model_data=False)
     T = 64
     num_epochs = 5
-    y_test, y_preds, resid, conf_intervals, parameters, date_col, val_test_split = produce_predictions(data["date", "returns", "realized_volatility_5", "realized_volatility_11", "realized_volatility_21", "realized_volatility_60", "vol_of_vol_21"], save_models=True, T=T, epochs=num_epochs)
+    y_test, y_preds, resid, conf_intervals, parameters, date_col, val_test_split = produce_predictions(symbol, data["date", "returns", "realized_volatility_5", "realized_volatility_11", "realized_volatility_21", "realized_volatility_60", "vol_of_vol_21"], save_models=True, T=T, epochs=num_epochs)
 
     print(f"Time taken: {time.perf_counter() - start} seconds")
     standard_deviations = [float(elem[1]) for elem in parameters]
@@ -197,12 +198,12 @@ if __name__ == "__main__":
     print(standard_deviations)
     print(val_test_split)
 
-    n = 5
+    n = 21
     selected_preds = np.array([elem[n - 1] for elem in y_preds])
     plt.plot(date_col[val_test_split:], [elem[n - 1] for elem in y_test], label="Actual")
-    plt.plot(date_col[val_test_split:], selected_preds, label=f"{n}-Step Predicted")
-    plt.plot(date_col[val_test_split:], selected_preds + conf_intervals[n - 1][0], linestyle="-.", c="black")
-    plt.plot(date_col[val_test_split:], selected_preds + conf_intervals[n - 1][1], linestyle="-.", c="black")
+    plt.plot(date_col[val_test_split:], selected_preds, label=f"{n}-Step Predicted", c="red")
+    plt.plot(date_col[val_test_split:], selected_preds + conf_intervals[n - 1][0], linestyle="dotted", alpha=0.5, c="red", label="95% Confidence Interval")
+    plt.plot(date_col[val_test_split:], selected_preds + conf_intervals[n - 1][1], linestyle="dotted", alpha=0.5, c="red")
     plt.legend()
     plt.show()
 
