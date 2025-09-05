@@ -5,11 +5,12 @@ import time
 import xgboost as xgb
 import matplotlib.pyplot as plt
 import polars as pl
+import json
 from torch.utils.data import DataLoader, TensorDataset
 from processing import get_data
 from sklearn.metrics import root_mean_squared_error
-from scipy.stats import norm, t
-from typing import Literal, Callable
+from scipy.stats import norm
+from typing import Literal
 from pathlib import Path
 
 
@@ -40,9 +41,9 @@ class NextStepHead(nn.Module):
 # SSL Training Loop
 def train_self_supervised(symbol: str, encoder: LSTMEncoder, head: NextStepHead, train_loader: DataLoader, epochs: int, lr: float, device: Literal["cpu", "cuda"] = "cpu") -> tuple[LSTMEncoder, nn.Sequential]:
     model = nn.Sequential(encoder, head).to(device)
-    if Path(f"encoder_{symbol}.torch").is_file():
-        encoder.load_state_dict(torch.load(f"encoder_{symbol}.torch", weights_only=True))
-        model.load_state_dict(torch.load(f"model_{symbol}.torch", weights_only=True))
+    if Path("models", f"encoder_{symbol}.torch").is_file():
+        encoder.load_state_dict(torch.load(f"models/encoder_{symbol}.torch", weights_only=True))
+        model.load_state_dict(torch.load(f"models/model_{symbol}.torch", weights_only=True))
         return encoder, model
 
     opt = torch.optim.Adam(model.parameters(), lr=lr)
@@ -161,9 +162,9 @@ def produce_predictions(symbol: str, data: pl.DataFrame, save_models: bool, T: i
     }
     booster = xgb.train(params, dtrain, num_boost_round=200)
     if save_models:
-        torch.save(trained_encoder.state_dict(), f"encoder_{symbol}.torch")
-        torch.save(model.state_dict(), f"model_{symbol}.torch")
-        booster.save_model(f"xgb_model_{symbol}.bin")
+        torch.save(trained_encoder.state_dict(), f"models/encoder_{symbol}.torch")
+        torch.save(model.state_dict(), f"models/model_{symbol}.torch")
+        booster.save_model(f"models/xgb_model_{symbol}.bin")
 
     # Uncertainty Quantification
     y_preds_val = booster.predict(dval)
@@ -186,19 +187,19 @@ if __name__ == "__main__":
     start = time.perf_counter()
 
     symbol = "AMZN"
-    data = get_data(symbol, filter_data_by_contract_duration=False, only_model_data=False)
+    data = get_data(symbol)
     T = 64
-    num_epochs = 5
+    num_epochs = 10
     y_test, y_preds, resid, conf_intervals, parameters, date_col, val_test_split = produce_predictions(symbol, data["date", "returns", "realized_volatility_5", "realized_volatility_11", "realized_volatility_21", "realized_volatility_60", "vol_of_vol_21"], save_models=True, T=T, epochs=num_epochs)
 
     print(f"Time taken: {time.perf_counter() - start} seconds")
-    standard_deviations = [float(elem[1]) for elem in parameters]
 
-    # Use these as inputs in the trading algo
-    print(standard_deviations)
-    print(val_test_split)
+    # Generate run configuration
+    run_config = {"uncertainties": [float(elem[1]) for elem in parameters], "start_index": val_test_split}
+    with open(f"models/run_config_{symbol}.json", "w") as file:
+        json.dump(run_config, file)
 
-    n = 21
+    n = 10
     selected_preds = np.array([elem[n - 1] for elem in y_preds])
     plt.plot(date_col[val_test_split:], [elem[n - 1] for elem in y_test], label="Actual")
     plt.plot(date_col[val_test_split:], selected_preds, label=f"{n}-Step Predicted", c="red")

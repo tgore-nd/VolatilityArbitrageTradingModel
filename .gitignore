@@ -13,5 +13,5 @@ data/
 .venv
 
 # Models
-*.torch
-*.bin
+models/
+configs/

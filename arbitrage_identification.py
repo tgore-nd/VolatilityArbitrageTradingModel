@@ -3,7 +3,8 @@ import numpy as np
 import torch
 import xgboost as xgb
 import matplotlib.pyplot as plt
-from vol_model import LSTMEncoder, produce_predictions, extract_features
+import json
+from vol_model import LSTMEncoder, extract_features
 from processing import get_data
 from dateutil.relativedelta import relativedelta
 
@@ -26,7 +27,7 @@ def generate_trades(symbol: str, test_data: pl.DataFrame, fit_uncertainties: lis
     date_series = X_raw_orig["date"]
     X_raw = X_raw_orig["returns", "realized_volatility_5", "realized_volatility_11", "realized_volatility_21", "realized_volatility_60", "vol_of_vol_21"].to_numpy()
     X = np.array([X_raw[i : i + window_size] for i in range(len(X_raw) - window_size - max_horizon)], dtype=np.float32)
-    encoder, booster = load_trained_models(f"encoder_{symbol}.torch", f"xgb_model_{symbol}.bin")
+    encoder, booster = load_trained_models(f"models/encoder_{symbol}.torch", f"models/xgb_model_{symbol}.bin")
     trades = {
         "puts_long": [], # (contract_id, rand_id, strike_price, premium_when_position_opened, close_position_date, exp_date, enter_date)
         "puts_short": [],
@@ -89,7 +90,6 @@ def generate_trades(symbol: str, test_data: pl.DataFrame, fit_uncertainties: lis
                         close_date = atm_put["expiration"].item()
                     else:
                         close_date = current_date + relativedelta(days = i + 1)
-
                     trades["puts_short"].append([atm_put["contractID"].item(), True, atm_put["strike"].item(), trade_price, close_date, atm_put["expiration"].item(), current_date])
                     trades["total_profit"] += trade_price * 100
                     trades_conducted += 1
@@ -100,7 +100,6 @@ def generate_trades(symbol: str, test_data: pl.DataFrame, fit_uncertainties: lis
                         close_date = atm_put["expiration"].item()
                     else:
                         close_date = current_date + relativedelta(days = i + 1)
-
                     trades["puts_long"].append([atm_put["contractID"].item(), True, atm_put["strike"].item(), trade_price, close_date, atm_put["expiration"].item(), current_date])
                     trades["total_profit"] -= trade_price * 100
                     trades_conducted += 1
@@ -127,15 +126,20 @@ def generate_trades(symbol: str, test_data: pl.DataFrame, fit_uncertainties: lis
 
     return date_series[:len(X)], total_profit
 
+def run_algorithm(symbol: str) -> tuple[pl.Series, list[float]]:
+    data = get_data(symbol)
+    with open(f"models/run_config_{symbol}.json", "r") as file:
+        run_config = json.load(file)
+    return generate_trades(symbol, data, run_config["uncertainties"], start_index=run_config["start_index"])
 
 if __name__ == "__main__":
     symbol = "AMZN"
-    data = get_data(symbol)
-    uncertainties = [0.05039837211370468, 0.058826345950365067, 0.06487543135881424, 0.06880736351013184, 0.07270260155200958, 0.07849174737930298, 0.08312343060970306, 0.08791489154100418, 0.09302067011594772, 0.0962076485157013, 0.10095525532960892, 0.10467714071273804, 0.10853711515665054, 0.10859818011522293, 0.10797742754220963, 0.10845895111560822, 0.10947378724813461, 0.10952106863260269, 0.10981345176696777, 0.11116074025630951, 0.11235242336988449]
-    date_series, total_profit = generate_trades(symbol, data, uncertainties, start_index=3408)
+    date_series, total_profit = run_algorithm(symbol)
 
     plt.plot(date_series, total_profit)
     plt.title(f"{symbol} Volatility Arbitrage")
     plt.xlabel("Time")
     plt.ylabel("Profit")
     plt.show()
+
+    print("Done")
