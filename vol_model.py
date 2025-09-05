@@ -24,7 +24,7 @@ class LSTMEncoder(nn.Module):
 
     def forward(self, x):
         _, (h_n, _) = self.lstm(x)
-        return h_n[-1]  # (batch, hidden_dim)
+        return h_n[-1] # (batch, hidden_dim)
 
 
 # Next-step prediction head
@@ -70,7 +70,7 @@ def train_self_supervised(encoder: LSTMEncoder, head: NextStepHead, train_loader
         
         print(f"Epoch {epoch+1}, Loss = {total_loss / n:.6f}")
 
-    return encoder, model  # trained encoder, head discarded later
+    return encoder, model # trained encoder, head discarded later
 
 
 def extract_features(encoder: LSTMEncoder, X: np.ndarray, batch_size: int = 4096, device: Literal["cpu", "cuda"] = "cpu") -> np.ndarray:
@@ -191,7 +191,10 @@ if __name__ == "__main__":
     y_test, y_preds, resid, conf_intervals, parameters, date_col, val_test_split = produce_predictions(data["date", "returns", "realized_volatility_5", "realized_volatility_11", "realized_volatility_21", "realized_volatility_60", "vol_of_vol_21"], save_models=True, T=T, epochs=num_epochs)
 
     print(f"Time taken: {time.perf_counter() - start} seconds")
-    print([float(elem[1]) for elem in parameters])
+    standard_deviations = [float(elem[1]) for elem in parameters]
+
+    # Use these as inputs in the trading algo
+    print(standard_deviations)
     print(val_test_split)
 
     n = 5

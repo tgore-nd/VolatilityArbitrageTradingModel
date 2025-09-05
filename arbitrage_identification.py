@@ -21,8 +21,8 @@ def load_trained_models(encoder_path: str, xgb_path: str, num_features: int = 6,
 
     return encoder, booster
 
-def generate_trades(test_data: pl.DataFrame, fit_uncertainties: list[float], max_horizon: int = 21, window_size: int = 64, z_threshold: float = 1.93) -> tuple[pl.Series, list[float]]:
-    X_raw_orig = test_data.group_by("date").first().sort("date")[2853:]
+def generate_trades(test_data: pl.DataFrame, fit_uncertainties: list[float], start_index: int, max_horizon: int = 21, window_size: int = 64, z_threshold: float = 1.93) -> tuple[pl.Series, list[float]]:
+    X_raw_orig = test_data.group_by("date").first().sort("date")[start_index:]
     date_series = X_raw_orig["date"]
     X_raw = X_raw_orig["returns", "realized_volatility_5", "realized_volatility_11", "realized_volatility_21", "realized_volatility_60", "vol_of_vol_21"].to_numpy()
     X = np.array([X_raw[i : i + window_size] for i in range(len(X_raw) - window_size - max_horizon)], dtype=np.float32)
@@ -131,7 +131,7 @@ def generate_trades(test_data: pl.DataFrame, fit_uncertainties: list[float], max
 if __name__ == "__main__":
     data = get_data("AAPL")
     uncertainties = [0.0397472158074379, 0.04684538394212723, 0.05283116176724434, 0.057300008833408356, 0.06144201382994652, 0.06536895781755447, 0.06939872354269028, 0.07407503575086594, 0.07858895510435104, 0.08284837007522583, 0.08689523488283157, 0.08914045989513397, 0.08884916454553604, 0.09038390964269638, 0.09106902778148651, 0.09349182993173599, 0.09508904814720154, 0.09517481178045273, 0.09482354670763016, 0.09399273246526718, 0.09394287317991257]
-    date_series, total_profit = generate_trades(data, uncertainties)
+    date_series, total_profit = generate_trades(data, uncertainties, start_index=2853)
 
     plt.plot(date_series, total_profit)
     plt.title("AAPL Volatility Arbitrage")
