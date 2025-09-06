@@ -24,7 +24,7 @@ def load_trained_models(encoder_path: str, xgb_path: str, num_features: int = 6,
 
     return encoder, booster
 
-def generate_trades(symbol: str, data: pl.DataFrame, fit_uncertainties: list[float], start_index: int, max_horizon: int = 21, window_size: int = 64, z_threshold: float = 1.93) -> tuple[pl.Series, list[float]]:
+def generate_trades(symbol: str, data: pl.DataFrame, fit_uncertainties: list[float], start_index: int, max_horizon: int = 21, window_size: int = 64, z_threshold: float = 1.96) -> tuple[pl.Series, list[float]]:
     """
     Conduct trades on `symbol` given the (unfiltered) `test_data` and model initial conditions.
 
@@ -43,7 +43,7 @@ def generate_trades(symbol: str, data: pl.DataFrame, fit_uncertainties: list[flo
     window_size : int
         The number of past days the model has to look at when generating predictions at each step. Corresponds to `T` argument in `vol_model.produce_predictions`. Default is `64`.
     z_threshold : float
-        The minimum 1-step z-score to allow us to conduct trades. Helps regularize fit and ensure we don't trade on uncertain information. Default is `1.93`, a 95% confidence interval.
+        The minimum 1-step z-score to allow us to conduct trades. Helps regularize fit and ensure we don't trade on uncertain information. Default is `1.96`, a 95% confidence interval.
     
     Returns
     -------
