@@ -1,11 +1,12 @@
 # Self-Supervised LSTM + XGBoost Volatility Arbitrage Trading Model
 ## Overview
-For this project, I:
+### Features
 * Devised self-supervised LSTM encoder to capture path-dependent signals across 20+ years of daily options chain data
 * Used XGBoost to forecast volatility using encoder output, improving test error by 50% over LSTM baseline
 * Optimized position sizing through statistical uncertainty quantification using $z$-scores and independent error distributions, resulting in a 38% improvement in total model profit per symbol on test set data 
 
-**About me:** I am a Physics & Applied Mathematics major at the University of Notre Dame. I have extensive experience in data analytics, mathematical modeling, and machine learning throughout experimental nuclear physics, an NSF undergraduate research fellowship, and a quantitative finance internship. If you would like to get in touch, please reach out via email at [tgore@nd.edu](mailto:tgore@nd.edu).
+### About Me
+I am a Physics & Applied Mathematics major at the University of Notre Dame. I have extensive experience in data analytics, mathematical modeling, and machine learning throughout experimental nuclear physics, an NSF undergraduate research fellowship, and a quantitative finance internship. If you would like to get in touch, please reach out via email at [tgore@nd.edu](mailto:tgore@nd.edu).
 
 ## Introduction
 *Volatility arbitrage* is an options trading strategy that attempts to profit from the difference between the implied and realized volatility of an option. A high implied volatility suggests that the market is pricing in large moves in the underlying's value, making options more expensive. Conversely, a low implied volatility suggests that the market believes the price of the underlying to remain stable.
