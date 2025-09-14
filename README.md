@@ -15,11 +15,11 @@ Obviously, the market cannot see the future, so the market's forecast of an asse
 
 To focus positions solely on volatility, a trader *delta hedge* their position, which encompasses buying an asset whose value moves in the opposite direction as the option position with the price of the underlying. Usually, this is done by buying/shorting the underlying itself, but there are much more complicated hedging methods that I won't expand upon here. The key takeaway is that, through delta hedging, we can trade and profit solely from volatility and time, removing directional considerations from our position.
 
-In general, we can tell that an option is *overpriced* when its implied volatility $\sigma_{\text{IV }t}$ is greater than its actual volatility $\sigma_{\text{RV }{t+h}}$ after some horizon $h$. Likewise, the option is *underpriced* when the opposite is true:
+In general, we can tell that an option is *overpriced* when its implied volatility $\sigma_{\text{IV}\_t}$ is greater than its actual volatility $\sigma_{\text{RV}\_{t+h}}$ after some horizon $h$. Likewise, the option is *underpriced* when the opposite is true:
 
-$$ \text{Overpriced: } \sigma_{\text{IV }t} > \sigma_{\text{RV }{t+h}} $$
+$$ \text{Overpriced: } \sigma_{\text{IV}\_t} > \sigma_{\text{RV}\_{t+h}} $$
 
-$$ \text{Underpriced: } \sigma_{\text{IV }t} < \sigma_{\text{RV }{t+h}} $$
+$$ \text{Underpriced: } \sigma_{\text{IV}\_t} < \sigma_{\text{RV}\_{t+h}} $$
 
 ## The Model
 Clearly, we are in need of a sophisticated tool to compute the realized volatility $h$ steps in the future. This falls under the umbrella of *time series analysis*, the practice of analyzing data that exhibits path dependence. Path-dependent data requires special models that respect current data points' dependence on past data points. 
@@ -41,11 +41,11 @@ At each step, we decide which decision tree to add by computing the negative gra
 The fits of decision trees themselves are nonlinear, so gradient boosting can easily handle nonlinear interactions. Therefore, ensembling it with the LSTM model can easily translate the embeddings to $h$-step realized volatility predictions. Overall, the LSTM helps quantify the "time" part of the time series data, and the gradient boosting model translates the insights extracted by the LSTM into realized volatility forecasts we can use to inform our trades.
 
 ### Trade Generation
-The model cannot be entirely certain of its predictions across the entire prediction horizon. To quantify fit uncertainties, a Gaussian distribution is fit to the residuals of each step's volatility forecasts. Positions are then sized according to a $z$-score representing the significance of the forecasted deviation between $\sigma_{\text{IV }t}$ and $\sigma_{\text{RV }{t+h}}$:
+The model cannot be entirely certain of its predictions across the entire prediction horizon. To quantify fit uncertainties, a Gaussian distribution is fit to the residuals of each step's volatility forecasts. Positions are then sized according to a $z$-score representing the significance of the forecasted deviation between $\sigma_{\text{IV}\_t}$ and $\sigma_{\text{RV}\_{t+h}}$:
 
-$$ z = \frac{\sigma_{\text{IV}_t} - \sigma_{\text{RV}_{t+h}}}{\sigma_{h\text{-step fit}}} $$
+$$ z = \frac{\sigma_{\text{IV}\_t} - \sigma_{\text{RV}\_{t+h}}}{\sigma_{h\text{-step fit}}} $$
 
-Note that $\sigma_{\text{IV}_t}$ is rescaled to match the horizon $h$.
+Note that $\sigma_{\text{IV}\_t}$ is rescaled to match the horizon $h$.
 The model will only trade if $|z| > 1.93$, a ~95% confidence interval. It will then look at the entire interval's $z$-scores and design a trading strategy for the selected option to exploit volatility-driven mispricing. All trades are done via long/short positions in puts. At the end of each time step, the model will buy/sell short a certain number of shares of the underlying stock to delta hedge its position, ensuring we are trading solely based on volatility and time.
 
 ## Data
