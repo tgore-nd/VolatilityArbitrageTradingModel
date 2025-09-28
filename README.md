@@ -1,9 +1,9 @@
-# Self-Supervised LSTM + XGBoost Volatility Arbitrage Trading Model
+# Self-Supervised LSTM + XGBoost Volatility Arbitrage Options Trading Model
 ## Overview
 ### Features
 * Devised self-supervised LSTM encoder to capture path-dependent signals across 20+ years of daily options chain data
 * Used XGBoost to forecast volatility using encoder output, improving test error by 50% over LSTM baseline
-* Optimized position sizing through statistical uncertainty quantification using $z$-scores and independent error distributions, resulting in a 38% improvement in total model profit per symbol on test set data 
+* Optimized delta-neutral option trades via statistical uncertainty quantification, resulting in a 38% improvement in total model profit per symbol on test set data 
 
 ### About Me
 I am a Physics & Applied Mathematics major at the University of Notre Dame. I have extensive experience in data analytics, mathematical modeling, and machine learning throughout experimental nuclear physics, an NSF undergraduate research fellowship, and a quantitative finance internship. If you would like to get in touch, please reach out via email at [tgore@nd.edu](mailto:tgore@nd.edu).
